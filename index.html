@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>ブラウザカメラ</title>
+<!--
+  ブラウザだけで動くカメラアプリ（単一HTMLファイル）
+  - 音声トラックを取得しない（audio: false）ため、シャッター音は一切鳴りません
+  - Audio / AudioContext などの音声再生APIは一切使用していません
+  - 撮影の合図は「白いフラッシュ」「カウントダウン」「暗転中の微かな明滅」のみ（視覚のみ・音は一切出さない）
+-->
+<style>
+  :root{
+    --bg:#0b0d12;
+    --panel:#151922;
+    --line:#252b38;
+    --text:#eef2f8;
+    --muted:#8b95a7;
+    --accent:#4f8cff;
+    --ok:#3ecf8e;
+    --danger:#ff6b60;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    display:flex;flex-direction:column;
+    -webkit-tap-highlight-color:transparent;
+    overscroll-behavior:none;
+  }
+  header{
+    flex:0 0 auto;
+    display:flex;align-items:center;justify-content:space-between;
+    gap:12px;
+    padding:14px 16px calc(10px + env(safe-area-inset-top,0px));
+    padding-top:calc(14px + env(safe-area-inset-top,0px));
+    border-bottom:1px solid var(--line);
+    background:var(--panel);
+  }
+  header h1{
+    font-size:16px;font-weight:650;margin:0;letter-spacing:.02em;
+    display:flex;align-items:center;gap:8px;
+  }
+  header h1 .dot{
+    width:8px;height:8px;border-radius:50%;background:var(--danger);flex:0 0 auto;
+    box-shadow:0 0 0 0 rgba(255,107,96,.5);
+  }
+  header h1 .dot.live{background:var(--ok);animation:pulse 2s infinite;}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(62,207,142,.5);}
+    70%{box-shadow:0 0 0 8px rgba(62,207,142,0);}
+    100%{box-shadow:0 0 0 0 rgba(62,207,142,0);}
+  }
+  #status{font-size:12px;color:var(--muted);text-align:right;line-height:1.35;}
+  #jsGuard{
+    background:#3a2a10;border-bottom:1px solid #6b5220;color:#ffd98a;
+    font-size:12.5px;padding:8px 14px;line-height:1.5;
+  }
+
+  main{
+    flex:1 1 auto;
+    display:flex;flex-direction:column;
+    min-height:0;
+    gap:10px;
+    padding:12px 12px 4px;
+    overflow:hidden;
+  }
+
+  #stage{
+    position:relative;
+    flex:1 1 auto;
+    min-height:0;
+    background:#000;
+    border-radius:16px;
+    overflow:hidden;
+    border:1px solid var(--line);
+  }
+  #video{
+    width:100%;height:100%;
+    object-fit:cover;
+    display:block;
+    background:#000;
+  }
+  #video.mirrored{transform:scaleX(-1);}
+
+  #placeholder{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;padding:24px;text-align:center;
+    color:var(--muted);font-size:13.5px;line-height:1.6;
+    background:#0e1117;
+  }
+  #placeholder[hidden]{display:none;}
+  #placeholder .icon{font-size:34px;line-height:1;}
+
+  #flash{
+    position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;
+  }
+  #flash.on{animation:flashAnim .22s ease-out;}
+  @keyframes flashAnim{0%{opacity:.9;}100%{opacity:0;}}
+
+  #countdown{
+    position:absolute;inset:0;display:none;
+    align-items:center;justify-content:center;
+    font-size:22vmin;font-weight:800;color:#fff;
+    text-shadow:0 4px 30px rgba(0,0,0,.7);
+    pointer-events:none;
+  }
+  #countdown.show{display:flex;}
+
+  .controls{
+    flex:0 0 auto;
+    display:grid;grid-template-columns:1fr auto 1fr;align-items:center;
+    gap:8px;
+    padding:10px 14px calc(12px + env(safe-area-inset-bottom,0px));
+    border-top:1px solid var(--line);
+    background:var(--panel);
+    z-index:60;
+  }
+  .controls .grp{display:flex;align-items:center;gap:6px;justify-content:flex-start;}
+  .controls .grp.right{justify-content:flex-end;}
+  button{
+    font:inherit;color:var(--text);
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:10px 14px;
+    cursor:pointer;
+    transition:transform .08s ease, background .15s ease, border-color .15s ease;
+  }
+  button:hover{background:#1b202b;border-color:#323a4b;}
+  button:active{transform:scale(.96);}
+  button:disabled{opacity:.45;cursor:not-allowed;}
+
+  #shutterBtn{
+    width:76px;height:76px;border-radius:50%;
+    border:4px solid #fff;background:rgba(255,255,255,.16);
+    padding:0;justify-self:center;
+    position:relative;
+  }
+  #shutterBtn::after{
+    content:"";position:absolute;inset:6px;border-radius:50%;
+    background:#fff;opacity:.92;transition:opacity .12s ease;
+  }
+  #shutterBtn:active::after{opacity:.55;}
+  #shutterBtn:disabled::after{opacity:.3;}
+
+  .side-btn{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:64px;font-size:11px;padding:9px 8px;}
+  .side-btn .glyph{font-size:19px;line-height:1.1;}
+  .side-btn.active{border-color:var(--accent);color:var(--accent);}
+
+  #galleryWrap{
+    flex:0 0 auto;
+    border-top:1px solid var(--line);
+    padding-top:10px;
+  }
+  #galleryHead{
+    display:flex;align-items:center;justify-content:space-between;
+    font-size:11.5px;color:var(--muted);margin-bottom:8px;letter-spacing:.04em;
+  }
+  #gallery{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(72px,1fr));
+    gap:8px;
+    max-height:17vh;
+    overflow:auto;
+  }
+  #gallery{min-height:64px;}
+  #gallery:empty::after{
+    content:"まだ写真がありません";
+    color:var(--muted);font-size:12px;grid-column:1/-1;text-align:center;align-self:center;
+  }
+  .shot{position:relative;aspect-ratio:4/3;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#000;}
+  .shot img{width:100%;height:100%;object-fit:cover;display:block;}
+  .shot a{
+    position:absolute;inset:auto 0 0 0;
+    font-size:10px;text-align:center;padding:3px 0;
+    background:rgba(0,0,0,.62);color:#fff;text-decoration:none;
+  }
+  .shot a:hover{background:rgba(79,140,255,.85);}
+
+  /* 暗転モード: 画面全体を消して真っ黒にするオーバーレイ */
+  #darkOverlay{
+    position:fixed;inset:0;background:#000;
+    display:none;z-index:200;
+    touch-action:manipulation;
+    -webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    cursor:none;
+  }
+  #darkOverlay.show{display:block;}
+  #darkOverlay.pulse{animation:darkPulse .2s ease-out;}
+  @keyframes darkPulse{0%{background:#141414;}100%{background:#000;}}
+
+  #toast{
+    position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));
+    transform:translate(-50%,20px);
+    background:#20263a;border:1px solid #2f3850;color:var(--text);
+    padding:10px 16px;border-radius:999px;font-size:12.5px;
+    opacity:0;pointer-events:none;transition:opacity .2s ease, transform .2s ease;
+    max-width:min(92vw,520px);text-align:center;
+    z-index:50;
+  }
+  #toast.show{opacity:1;transform:translate(-50%,0);}
+  #toast.error{border-color:#5c2b2b;background:#2a1a1c;}
+  #canvas{display:none;}
+  .hint{font-size:11.5px;color:var(--muted);text-align:center;padding:0 4px 6px;}
+</style>
+</head>
+<body>
+  <!-- ホスティング側のCSPでスクリプトが止まったら、この通知だけが残る -->
+  <div id="jsGuard">⚠️ JavaScript が実行されていません。ホスティング側の Content-Security-Policy がインラインスクリプトを止めている可能性があります。</div>
+  <script>document.getElementById('jsGuard').remove();</script>
+  <header>
+    <h1><span class="dot" id="liveDot"></span>ブラウザカメラ</h1>
+    <div id="status">待機中</div>
+  </header>
+
+  <main>
+    <div id="stage">
+      <video id="video" playsinline autoplay muted></video>
+      <div id="flash"></div>
+      <div id="countdown"></div>
+      <div id="placeholder">
+        <div class="icon">📷</div>
+        <div id="placeholderText">カメラの準備ができていません。</div>
+        <button id="startBtn" type="button">カメラを起動する</button>
+      </div>
+    </div>
+
+    <div class="hint">🔇 シャッター音は鳴りません ／ 🌑 暗転モード: 1タップで撮影・2タップで解除</div>
+
+    <div id="galleryWrap">
+      <div id="galleryHead">
+        <span>撮影履歴</span>
+        <button id="clearBtn" type="button" style="padding:4px 10px;font-size:11px;">全消去</button>
+      </div>
+      <div id="gallery"></div>
+    </div>
+  </main>
+
+  <!-- 撮影ボタンを画面のいちばん下（親指の届く位置）に固定 -->
+  <footer class="controls">
+    <div class="grp">
+      <button id="switchBtn" class="side-btn" type="button" disabled>
+        <span class="glyph">🔄</span>切替
+      </button>
+      <button id="darkBtn" class="side-btn" type="button" title="画面を暗転して隠す">
+        <span class="glyph">🌑</span>暗転
+      </button>
+    </div>
+    <button id="shutterBtn" type="button" aria-label="撮影" disabled></button>
+    <div class="grp right">
+      <button id="timerBtn" class="side-btn" type="button" title="セルフタイマー">
+        <span class="glyph">⏱</span><span id="timerLabel">OFF</span>
+      </button>
+    </div>
+  </footer>
+
+  <div id="darkOverlay" aria-hidden="true"></div>
+  <div id="toast"></div>
+  <canvas id="canvas"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const video = $('video');
+  const canvas = $('canvas');
+  const placeholder = $('placeholder');
+  const placeholderText = $('placeholderText');
+  const startBtn = $('startBtn');
+  const shutterBtn = $('shutterBtn');
+  const switchBtn = $('switchBtn');
+  const timerBtn = $('timerBtn');
+  const timerLabel = $('timerLabel');
+  const flash = $('flash');
+  const countdownEl = $('countdown');
+  const gallery = $('gallery');
+  const clearBtn = $('clearBtn');
+  const statusEl = $('status');
+  const liveDot = $('liveDot');
+  const toastEl = $('toast');
+  const darkBtn = $('darkBtn');
+  const darkOverlay = $('darkOverlay');
+
+  /** 背面 'environment' / 前面 'user' */
+  let facingMode = 'environment';
+  let stream = null;
+  let videoTrack = null;
+  let deviceList = [];
+  let timerSeconds = 0;
+  let busy = false;
+  /** 暗転モード: 画面を真っ暗にして隠す */
+  let darkMode = false;
+  let tapTimer = null;
+  const TAP_DELAY = 400;
+
+  const TIMER_STEPS = [0, 3, 5, 10];
+  const supported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  /** 埋め込み元がカメラを許可しているか（判定できなければ null） */
+  function cameraPolicyAllowed() {
+    try {
+      const policy = document.permissionsPolicy || document.featurePolicy;
+      if (policy && typeof policy.allowsFeature === 'function') return policy.allowsFeature('camera');
+    } catch (e) {
+      /* 判定できない環境では無視 */
+    }
+    return null;
+  }
+
+  /** 起動を止めてしまう原因を先に判定する（問題が無ければ null） */
+  function supportProblem() {
+    if (window.isSecureContext === false) {
+      return 'このページは HTTPS で配信されていないためカメラは起動できません。https:// で始まるURLで開いてください（ローカルの file:// は例外的に許可されます）。';
+    }
+    if (!supported) {
+      if (window.self !== window.top) {
+        return 'このページはiframe内に表示されており、埋め込み元がカメラAPIを無効にしています。iframeを外して直接開けるURL（静的ホスティングなど）で利用してください。';
+      }
+      return 'このブラウザはカメラAPIに対応していません。Chrome / Edge / Safari の最新版でお試しください。';
+    }
+    if (cameraPolicyAllowed() === false) {
+      return '埋め込み元のページがカメラの使用を禁止しています（Permissions Policy）。iframeで表示されているためで、このホスティングではカメラは使えません。';
+    }
+    return null;
+  }
+
+  /** ヘッダー右上に表示する短い原因ラベル */
+  function problemStatus() {
+    if (window.isSecureContext === false) return 'HTTPS必須';
+    if (!supported) return window.self !== window.top ? '埋め込み制限' : '非対応';
+    if (cameraPolicyAllowed() === false) return 'カメラ禁止';
+    return '非対応';
+  }
+
+  /* ---------- UI helpers ---------- */
+
+  let toastTimer = null;
+  function toast(message, isError) {
+    if (darkMode) return; // 暗転中は画面を照らさない
+    toastEl.textContent = message;
+    toastEl.classList.toggle('error', !!isError);
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 3200);
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text;
+  }
+
+  function showPlaceholder(text) {
+    placeholderText.textContent = text;
+    placeholder.hidden = false;
+  }
+
+  function hidePlaceholder() {
+    placeholder.hidden = true;
+  }
+
+  /* ---------- カメラ制御（音声なし） ---------- */
+
+  function applyMirror() {
+    // 前面カメラのときだけプレビューを鏡像にする（保存画像はそのまま）
+    video.classList.toggle('mirrored', facingMode === 'user');
+  }
+
+  function stopCamera() {
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    stream = null;
+    videoTrack = null;
+    video.srcObject = null;
+    shutterBtn.disabled = true;
+    switchBtn.disabled = true;
+    liveDot.classList.remove('live');
+  }
+
+  async function startCamera(mode) {
+    const problem = supportProblem();
+    if (problem) {
+      showPlaceholder(problem);
+      setStatus(problemStatus());
+      return;
+    }
+
+    if (mode) facingMode = mode;
+    stopCamera();
+    setStatus('起動中…');
+    showPlaceholder('カメラへのアクセスを許可してください…');
+
+    try {
+      // audio: false により音声トラックを一切取得しない = シャッター音も鳴らさない
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+    } catch (err) {
+      handleCameraError(err);
+      return;
+    }
+
+    videoTrack = stream.getVideoTracks()[0] || null;
+    if (videoTrack) {
+      const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
+      if (settings.facingMode) facingMode = settings.facingMode;
+    }
+
+    video.srcObject = stream;
+    video.muted = true; // 念のため（音は常にオフ）
+    try {
+      await video.play();
+    } catch (err) {
+      // 自動再生がブロックされた場合はユーザー操作で再開する
+      showPlaceholder('タップしてプレビューを開始してください。');
+      startBtn.textContent = 'プレビュー開始';
+    }
+
+    applyMirror();
+    hidePlaceholder();
+    shutterBtn.disabled = false;
+    liveDot.classList.add('live');
+    setStatus(
+      `${video.videoWidth || '?'} × ${video.videoHeight || '?'} / ${
+        facingMode === 'user' ? '前面' : '背面'
+      }`
+    );
+
+    refreshDevices();
+  }
+
+  async function refreshDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      deviceList = devices.filter((d) => d.kind === 'videoinput');
+      switchBtn.disabled = deviceList.length < 2;
+    } catch (err) {
+      switchBtn.disabled = true;
+    }
+  }
+
+  function handleCameraError(err) {
+    const name = err && err.name ? err.name : 'Error';
+    let message = 'カメラを起動できませんでした。';
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      message =
+        'カメラの使用が許可されていません。アドレスバーまたは設定からこのサイトのカメラ権限を「許可」にしてください。';
+      if (window.self !== window.top) {
+        message += '（このページがiframe内に埋め込まれている場合もカメラは自動でブロックされます）';
+      }
+    } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+      message = '利用できるカメラが見つかりませんでした。カメラが接続されているか確認してください。';
+    } else if (name === 'NotReadableError' || name === 'AbortError') {
+      message = 'カメラが他のアプリで使用中の可能性があります。他のアプリを閉じてから再試行してください。';
+    } else if (location.protocol === 'file:') {
+      message =
+        'この環境では file:// からカメラを開けませんでした。ローカルサーバー（http://localhost）経由で開くと動作します。';
+    }
+    stopCamera();
+    showPlaceholder(message);
+    setStatus('エラー: ' + name);
+    toast(message, true);
+  }
+
+  async function toggleCamera() {
+    if (!stream) return;
+    if (deviceList.length >= 2) {
+      // 列挙できたデバイスを順番に切り替える
+      const currentId = videoTrack && videoTrack.getSettings ? videoTrack.getSettings().deviceId : null;
+      const index = Math.max(0, deviceList.findIndex((d) => d.deviceId === currentId));
+      const next = deviceList[(index + 1) % deviceList.length];
+      stopCamera();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: next.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+      } catch (err) {
+        handleCameraError(err);
+        return;
+      }
+      videoTrack = stream.getVideoTracks()[0] || null;
+      video.srcObject = stream;
+      try { await video.play(); } catch (e) { /* 無視 */ }
+      hidePlaceholder();
+      shutterBtn.disabled = false;
+      switchBtn.disabled = false;
+      liveDot.classList.add('live');
+      setStatus(`${video.videoWidth || '?'} × ${video.videoHeight || '?'}`);
+      return;
+    }
+    // デバイス列挙ができない場合は facingMode をトグル
+    await startCamera(facingMode === 'user' ? 'environment' : 'user');
+  }
+
+  /* ---------- 撮影 ---------- */
+
+  function playFlash() {
+    if (darkMode) {
+      darkPulse(); // 暗転中は白いフラッシュを使わず、画面をわずかに明滅させる
+      return;
+    }
+    flash.classList.remove('on');
+    void flash.offsetWidth; // リフローでアニメーションをリセット
+    flash.classList.add('on');
+    // 音は鳴らさない（視覚エフェクトのみ）
+  }
+
+  /** 暗転モード中の撮影合図: 真っ黒のまま一瞬だけ #141414 に明滅する */
+  function darkPulse() {
+    darkOverlay.classList.remove('pulse');
+    void darkOverlay.offsetWidth;
+    darkOverlay.classList.add('pulse');
+  }
+
+  function capture() {
+    if (!videoTrack || busy) return;
+    if (timerSeconds > 0) {
+      runCountdown(timerSeconds);
+    } else {
+      takePhoto();
+    }
+  }
+
+  function runCountdown(seconds) {
+    busy = true;
+    shutterBtn.disabled = true;
+    let remain = seconds;
+    countdownEl.textContent = String(remain);
+    countdownEl.classList.add('show');
+    const tick = setInterval(() => {
+      remain -= 1;
+      if (remain > 0) {
+        countdownEl.textContent = String(remain);
+        return;
+      }
+      clearInterval(tick);
+      countdownEl.classList.remove('show');
+      busy = false;
+      shutterBtn.disabled = false;
+      takePhoto();
+    }, 1000);
+  }
+
+  function takePhoto() {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      toast('映像の準備ができていません。少し待ってから撮影してください。', true);
+      return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, width, height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          toast('画像の生成に失敗しました。', true);
+          return;
+        }
+        addToGallery(blob, width, height);
+        playFlash();
+        toast('撮影しました（音は鳴りません）');
+      },
+      'image/jpeg',
+      0.95
+    );
+  }
+
+  function timestampName() {
+    const d = new Date();
+    const pad = (n, l) => String(n).padStart(l || 2, '0');
+    return `photo-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(
+      d.getHours()
+    )}${pad(d.getMinutes())}${pad(d.getSeconds())}.jpg`;
+  }
+
+  function addToGallery(blob, width, height) {
+    const url = URL.createObjectURL(blob);
+    const filename = timestampName();
+
+    const cell = document.createElement('div');
+    cell.className = 'shot';
+
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = filename;
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.textContent = '保存';
+    link.title = `${width} × ${height} を保存`;
+
+    cell.appendChild(img);
+    cell.appendChild(link);
+    gallery.prepend(cell); // 新しい順
+
+    // 履歴は最大24枚まで保持
+    while (gallery.children.length > 24) {
+      const last = gallery.lastElementChild;
+      const lastImg = last && last.querySelector('img');
+      if (lastImg && lastImg.src.startsWith('blob:')) URL.revokeObjectURL(lastImg.src);
+      gallery.removeChild(last);
+    }
+  }
+
+  /* ---------- イベント ---------- */
+
+  startBtn.addEventListener('click', () => {
+    if (stream && video.paused) {
+      video.play().catch(() => {});
+      hidePlaceholder();
+      return;
+    }
+    startCamera();
+  });
+
+  shutterBtn.addEventListener('click', capture);
+  switchBtn.addEventListener('click', toggleCamera);
+
+  /* ---------- 暗転モード ---------- */
+
+  function enterDarkMode() {
+    darkMode = true;
+    darkOverlay.classList.add('show');
+    darkOverlay.classList.remove('pulse');
+    toastEl.classList.remove('show');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    setStatus('暗転中');
+  }
+
+  function exitDarkMode() {
+    if (tapTimer) {
+      clearTimeout(tapTimer);
+      tapTimer = null;
+    }
+    if (!darkMode) return;
+    darkMode = false;
+    darkOverlay.classList.remove('show');
+    darkOverlay.classList.remove('pulse');
+    setStatus(
+      videoTrack
+        ? `${video.videoWidth || '?'} × ${video.videoHeight || '?'} / ${
+            facingMode === 'user' ? '前面' : '背面'
+          }`
+        : '待機中'
+    );
+  }
+
+  darkBtn.addEventListener('click', enterDarkMode);
+
+  darkOverlay.addEventListener('click', () => {
+    if (tapTimer) {
+      // 2タップ目: 撮影せず元の画面へ戻る
+      clearTimeout(tapTimer);
+      tapTimer = null;
+      exitDarkMode();
+      return;
+    }
+    // 1タップ: 400ms 待って2タップ目が無ければ撮影（2タップ目があれば撮影せず解除）
+    tapTimer = setTimeout(() => {
+      tapTimer = null;
+      capture();
+    }, TAP_DELAY);
+  });
+
+  darkOverlay.addEventListener('animationend', (event) => {
+    if (event.animationName === 'darkPulse') darkOverlay.classList.remove('pulse');
+  });
+
+  timerBtn.addEventListener('click', () => {
+    const index = (TIMER_STEPS.indexOf(timerSeconds) + 1) % TIMER_STEPS.length;
+    timerSeconds = TIMER_STEPS[index];
+    timerLabel.textContent = timerSeconds === 0 ? 'OFF' : `${timerSeconds}秒`;
+    timerBtn.classList.toggle('active', timerSeconds > 0);
+    toast(timerSeconds === 0 ? 'セルフタイマー: OFF' : `セルフタイマー: ${timerSeconds}秒`);
+  });
+
+  clearBtn.addEventListener('click', () => {
+    Array.from(gallery.querySelectorAll('img')).forEach((img) => {
+      if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+    });
+    gallery.innerHTML = '';
+    toast('履歴を消去しました');
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && darkMode) {
+      exitDarkMode();
+      return;
+    }
+    if (event.code === 'Space' || event.key === 'Enter') {
+      if (document.activeElement && document.activeElement.tagName === 'BUTTON') return;
+      event.preventDefault();
+      capture();
+    }
+  });
+
+  // タブが隠れたらカメラを止める（バッテリー節約・他アプリとの競合回避）
+  document.addEventListener('visibilitychange', () => {
+    if (!videoTrack) return;
+    if (document.hidden) {
+      videoTrack.enabled = false;
+    } else {
+      videoTrack.enabled = true;
+    }
+  });
+
+  window.addEventListener('pagehide', stopCamera);
+
+  /* ---------- 初期化 ---------- */
+
+  const startupProblem = supportProblem();
+  if (startupProblem) {
+    showPlaceholder(startupProblem);
+    startBtn.disabled = true;
+    setStatus(problemStatus());
+  } else if (location.protocol === 'file:' && !navigator.mediaDevices.enumerateDevices) {
+    setStatus('制限あり');
+  } else {
+    showPlaceholder('カメラを起動するにはボタンを押してください。');
+    setStatus('待機中');
+    // すでに許可済みなら自動起動を試みる（未許可の場合はボタン操作で）
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions
+        .query({ name: 'camera' })
+        .then((result) => {
+          if (result.state === 'granted') startCamera();
+        })
+        .catch(() => {});
+    }
+  }
+})();
+</script>
+</body>
+</html>
